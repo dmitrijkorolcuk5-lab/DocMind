@@ -1,8 +1,11 @@
+import os
 from collections.abc import AsyncIterator
 
 import httpx
 import pytest
 from fastapi import FastAPI
+
+os.environ.setdefault("GEMINI_API_KEY", "test-key")
 
 from app.main import create_app
 
@@ -19,4 +22,3 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
         yield test_client
-

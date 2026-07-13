@@ -16,7 +16,7 @@ async def test_chat_repository_lists_entities_and_total() -> None:
     session.scalar = AsyncMock(return_value=1)
     repository = ChatRepository(session)
 
-    rows, total = await repository.list(limit=10, offset=0)
+    rows, total = await repository.list_all(limit=10, offset=0)
 
     assert rows == [chat]
     assert total == 1
@@ -36,4 +36,3 @@ async def test_chat_repository_commits_and_refreshes_on_create() -> None:
     session.add.assert_called_once_with(chat)
     session.commit.assert_awaited_once()
     session.refresh.assert_awaited_once_with(chat)
-

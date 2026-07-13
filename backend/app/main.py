@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
+from arq.connections import RedisSettings, create_pool
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
@@ -22,8 +23,17 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    arq_redis = await create_pool(
+        RedisSettings(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            database=settings.REDIS_DATABASE,
+        ),
+        default_queue_name=settings.ARQ_QUEUE_NAME,
+    )
     storage = MinioObjectStorage(settings)
     app.state.redis = redis
+    app.state.arq_redis = arq_redis
     app.state.object_storage = storage
     try:
         await storage.ensure_bucket()
@@ -32,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await arq_redis.aclose()
         await redis.aclose()
         await engine.dispose()
 

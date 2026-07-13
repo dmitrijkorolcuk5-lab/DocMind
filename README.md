@@ -1,228 +1,226 @@
-# DocMind — Chat With Your Docs
+# DocMind - Chat With Your Docs
 
-DocMind is a production-minded foundation for a single-workspace RAG application. Users will
-eventually upload PDF, TXT, and DOCX files, connect one or more documents to a chat, and receive
-source-grounded streamed answers. This first phase deliberately establishes the data model,
-service boundaries, infrastructure, observable API, and usable frontend shell without pretending
-that the retrieval or AI pipeline already exists.
+DocMind is a local-first RAG MVP for chatting with uploaded PDF, TXT, and DOCX documents. It stores
+files in MinIO, indexes parsed chunks in PostgreSQL with pgvector, and streams answers from a
+provider-based AI layer.
 
-## Current implemented scope
+By default, DocMind uses Gemini:
 
-- FastAPI application with lifespan-managed Redis, PostgreSQL engine, and MinIO integration.
-- Liveness and dependency-aware readiness endpoints.
-- PostgreSQL-backed document listing, chat listing, and empty-chat creation.
-- Async SQLAlchemy repositories/services with typed response schemas.
-- Complete initial relational model for documents, chunks, chats, messages, and citations.
-- Alembic migration enabling pgvector and creating all initial tables and constraints.
-- Async S3-compatible object storage adapter with safe keys and idempotent bucket setup.
-- ARQ worker with an executable `health_job` proving the worker/Redis path.
-- Structured request logging, request IDs, and a consistent API error envelope.
-- React application shell with Documents, Chats, and Chat Details routes and API states.
-- Docker Compose stack with health checks and explicit one-shot init/migration services.
-- Backend and frontend unit/component tests, strict type checks, linting, and frontend build.
+- LLM: `gemini-3.1-flash-lite`
+- Embeddings: `gemini-embedding-001`
+- Embedding dimension: `768`
 
-## Planned final functionality
+OpenAI providers remain available as an optional fallback.
 
-The target product will add document upload, asynchronous parsing/indexing, multi-document chat
-selection, pgvector similarity search, source construction, an isolated LLM implementation, and
-SSE answer streaming. Provider contracts already keep embedding and generation vendors outside
-the domain/API layers.
+## Current Scope
 
-## Architecture overview
+- FastAPI backend with async SQLAlchemy, Alembic, Redis, ARQ, MinIO, and structured errors.
+- React + TypeScript + Vite frontend with Documents, Chats, and Chat Details workflows.
+- Multipart upload for PDF, TXT, and DOCX.
+- Async `process_document(document_id)` worker pipeline.
+- PDF parsing with PyMuPDF, TXT parsing with encoding fallback, DOCX parsing with python-docx.
+- Block-aware chunking with approximate token counting and overlap.
+- Provider-based embeddings and LLM generation: `gemini` by default, `openai` optional.
+- pgvector retrieval scoped only to documents selected for the chat.
+- POST streaming with SSE events: `sources`, `token`, `done`, `error`.
+- Sources displayed with filename, page when available, excerpt, and score.
 
-Backend request flow is intentionally direct:
+## Local Setup
 
-```text
-FastAPI router -> application service -> repository -> async SQLAlchemy -> PostgreSQL
-                               |
-                               +-> infrastructure protocol -> MinIO / future AI provider
-```
-
-Routers only translate HTTP contracts. Services coordinate use cases. Repositories own queries.
-ORM models and Pydantic schemas are separate. Heavy document work will enter through ARQ rather
-than blocking an API process. The frontend keeps server state in TanStack Query; Zustand is
-available only for future local UI state.
-
-## Technology stack
-
-- Backend: Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2 async, asyncpg, Alembic, pgvector,
-  Redis, ARQ, aioboto3, structlog, pytest, Ruff, mypy.
-- Frontend: React, strict TypeScript, Vite, Tailwind CSS, React Router, TanStack Query, React Hook
-  Form, Zod, Zustand, Vitest, React Testing Library, ESLint, Prettier.
-- Infrastructure: Docker Compose, PostgreSQL 16 + pgvector, Redis 7, MinIO.
-
-## Repository structure
-
-```text
-.
-├── backend/
-│   ├── app/
-│   │   ├── api/v1/              # HTTP contracts
-│   │   ├── chats/               # chat models, schemas, repository, service
-│   │   ├── documents/           # document models, schemas, repository, service
-│   │   ├── core/                # config, errors, middleware, structured logging
-│   │   ├── database/            # declarative base, session, model registry
-│   │   ├── embeddings/          # provider protocol
-│   │   ├── health/              # readiness orchestration
-│   │   ├── llm/                 # provider protocol
-│   │   ├── storage/             # object storage protocol and MinIO adapter
-│   │   └── workers/             # ARQ settings and tasks
-│   ├── alembic/                 # migration environment and revisions
-│   └── tests/
-├── frontend/
-│   └── src/
-│       ├── app/                 # providers, routes, layout
-│       ├── entities/            # API entity types
-│       ├── features/            # feature API modules
-│       ├── pages/               # route pages
-│       └── shared/              # API client and shared UI
-├── docker-compose.yml
-└── .env.example
-```
-
-## Local setup
-
-Copy the example configuration and replace the local-only secrets:
+Copy environment variables:
 
 ```bash
 cp .env.example .env
 ```
 
-For a host-run backend, create a virtual environment at the repository root:
+PowerShell:
 
-```bash
-python -m venv .venv
-# Linux/macOS
-.venv/bin/python -m pip install -e "./backend[dev]"
-# Windows PowerShell
-.\.venv\Scripts\python.exe -m pip install -e ".\backend[dev]"
+```powershell
+Copy-Item .env.example .env
 ```
 
-Run PostgreSQL, Redis, and MinIO (or the complete Compose stack), then from `backend/` run:
+Set your Gemini API key in `.env`:
 
-```bash
-alembic upgrade head
-uvicorn app.main:app --reload
+```env
+GEMINI_API_KEY=your-real-key
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-3.1-flash-lite
+EMBEDDING_PROVIDER=gemini
+EMBEDDING_MODEL=gemini-embedding-001
+EMBEDDING_DIMENSIONS=768
 ```
 
-For the frontend:
+The root `.env` file is ignored by Git and is meant for real local credentials. `.env.example`
+must stay committed because it documents the required variables, but it must only contain safe
+placeholder values.
 
-```bash
-cd frontend
-npm ci
-npm run dev
+Never put backend secrets into `VITE_*` variables. Vite variables are bundled into frontend
+JavaScript and are public. Gemini requests must flow through FastAPI:
+
+```text
+React -> FastAPI -> Gemini API
 ```
 
-The UI is at <http://localhost:5173>, API docs at <http://localhost:8000/docs>, and the MinIO
-console at <http://localhost:9001>.
-
-## Environment variables
-
-`.env.example` is the canonical inventory. Main groups are:
-
-- Application: `APP_ENV`, `APP_NAME`, `API_V1_PREFIX`, `LOG_LEVEL`, `CORS_ORIGINS`.
-- PostgreSQL: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`,
-  `POSTGRES_PORT`.
-- Redis: `REDIS_HOST`, `REDIS_PORT`.
-- MinIO: `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`,
-  `MINIO_SECURE`.
-- Future AI: `OPENAI_API_KEY`, `LLM_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`.
-- Frontend: `VITE_API_URL`.
-
-`OPENAI_API_KEY` may remain empty in this phase. Secrets are Pydantic `SecretStr` values and are
-never intentionally logged. `.env` is ignored by Git.
-
-## Running with Docker Compose
+Start the stack:
 
 ```bash
 docker compose up --build
-docker compose ps
-docker compose logs -f
-docker compose down
-docker compose down -v  # also removes local PostgreSQL, Redis, and MinIO data
 ```
 
-Startup ordering is health-gated. `minio-init` creates the bucket idempotently; `migrate` applies
-Alembic and must complete successfully before API/worker startup. The API starts before the
-frontend and must become healthy first.
+Open:
 
-## Running migrations
+- Frontend: <http://localhost:5173>
+- API docs: <http://localhost:8000/docs>
+- Health: <http://localhost:8000/api/v1/health/ready>
+- MinIO console: <http://localhost:9001>
 
-Compose applies migrations through its one-shot service. Run them explicitly when needed:
+MinIO login:
+
+- Username: `docmind`
+- Password: `change-me-too`
+
+If you changed MinIO root credentials after a previous local run, reset local volumes:
+
+```bash
+docker compose down -v
+docker compose up --build
+```
+
+## Docker Vs Local Hostnames
+
+Inside Docker Compose:
+
+- PostgreSQL host: `postgres`
+- Redis host: `redis`
+- MinIO endpoint: `minio:9000`
+
+When running backend or worker outside Docker, use localhost equivalents:
+
+- PostgreSQL host: `localhost`
+- Redis host: `localhost`
+- MinIO endpoint: `localhost:9000`
+
+Gemini is called over the public Gemini API from either environment.
+
+## Environment Variables
+
+Important Gemini settings:
+
+```env
+GEMINI_API_KEY=your-real-key
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-3.1-flash-lite
+EMBEDDING_PROVIDER=gemini
+EMBEDDING_MODEL=gemini-embedding-001
+EMBEDDING_DIMENSIONS=768
+```
+
+Optional OpenAI fallback:
+
+```env
+LLM_PROVIDER=openai
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=...
+LLM_MODEL=gpt-4.1-mini
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+```
+
+If either provider is set to `gemini`, `GEMINI_API_KEY` is required. If either provider is set to
+`openai`, `OPENAI_API_KEY` is required.
+
+## Architecture
+
+Backend request flow:
+
+```text
+Router -> Service -> Repository -> async SQLAlchemy -> PostgreSQL/pgvector
+                 -> Infrastructure Protocols -> MinIO / Embeddings / LLM
+                 -> ARQ Worker -> parser -> chunker -> embeddings -> chunks
+```
+
+The AI layer is provider-based:
+
+- `GeminiEmbeddingProvider`
+- `OpenAIEmbeddingProvider`
+- `GeminiLLMProvider`
+- `OpenAILLMProvider`
+
+Services depend on provider protocols, not concrete vendors.
+
+## Document Processing
+
+Uploaded files are stored in MinIO under generated safe object keys. PostgreSQL stores metadata and
+processing status. The ARQ worker downloads the file, parses text, creates overlapping chunks,
+generates embeddings, writes chunks to pgvector, and marks the document `ready`.
+
+If Gemini is unreachable, the key is invalid, or a model rejects the request, processing fails
+safely and the document status becomes `failed` with a clear `error_message`. Documents should not
+stay stuck in `processing` after provider errors.
+
+## Migrations
+
+Compose runs migrations through the one-shot `migrate` service:
 
 ```bash
 docker compose run --rm migrate
 ```
 
-For a host environment, run `alembic upgrade head` from `backend/`. FastAPI never calls Alembic or
-`Base.metadata.create_all()` during startup.
-
-## Running backend tests and checks
-
-From `backend/`, with the development dependencies installed:
+For host development, run from `backend/`:
 
 ```bash
+alembic upgrade head
+```
+
+The second migration switches local embeddings to `vector(768)` for `gemini-embedding-001`. It
+clears old chunks because embeddings with different dimensions are incompatible. This is acceptable
+for local development; reset volumes if you want a fully clean state.
+
+## Tests And Checks
+
+Backend:
+
+```bash
+cd backend
 ruff check .
 mypy app
 pytest
 ```
 
-The suite uses mocks/test doubles for external services and does not call OpenAI.
-
-## Running frontend tests and checks
-
-From `frontend/`:
+Frontend:
 
 ```bash
+cd frontend
 npm run lint
 npm run test -- --run
 npm run build
-npm audit --audit-level=moderate
 ```
 
-## Engineering decisions
+Docker config:
 
-- Embeddings use a centralized persisted contract of 1,536 dimensions, matching
-  `text-embedding-3-small`. Migration revisions remain self-contained, so the initial revision
-  records the same dimension explicitly.
-- Chunk embeddings are nullable because a chunk can be persisted before embedding succeeds.
-- No vector index is created yet. HNSW versus IVFFlat, distance operator, and tuning parameters
-  should be selected from the real corpus/query profile; a premature index would encode guesses.
-- Foreign keys cascade for aggregate-owned rows. Join tables use composite primary keys to prevent
-  duplicate chat-document links and duplicate message-chunk sources.
-- Files belong in S3-compatible storage, never PostgreSQL. Generated object keys combine date,
-  UUID, and a sanitized basename; original filenames remain display metadata.
-- Readiness checks PostgreSQL, Redis, and MinIO concurrently and returns HTTP 503 if any critical
-  dependency fails. Liveness only describes the API process.
-- The worker exposes only an honest health job today. The intended `process_document(document_id)`
-  state machine is documented in code but is not represented as completed functionality.
-- Docker runs application containers as non-root users. Vite's mutable optimizer cache is isolated
-  in container `/tmp`; source and installed dependencies remain read-only.
+```bash
+docker compose config
+```
 
-## Current limitations
+Tests mock storage, embeddings, LLM streaming, and UI network calls. They do not call real Gemini
+or real OpenAI.
 
-The following are **not implemented** in phase one:
+## Current Limitations
 
-- document upload and deletion flows;
-- PDF, TXT, or DOCX parsing;
-- OCR;
-- chunking and tokenization;
-- embedding generation;
-- vector retrieval or ranking;
-- LLM answer generation;
-- message APIs and SSE streaming;
-- chat document selection APIs;
-- authorization, registration, multi-workspace support, or deployment automation.
+- No authentication or user accounts.
+- No OCR; scanned PDFs fail with a clear message.
+- No deployment setup.
+- No GitHub Actions CI.
+- No advanced reranking or hybrid search.
+- Streaming uses POST + fetch streaming rather than browser `EventSource`.
 
-The chat detail input and document selector are intentionally disabled in the UI. Existing message,
-source, embedding, and association tables prepare the next phase but are not exposed as fake APIs.
+## Troubleshooting
 
-## Next implementation steps
-
-1. Add validated multipart upload with streaming size limits and compensation across MinIO/DB.
-2. Enqueue and implement the idempotent `process_document(document_id)` state machine.
-3. Add format-specific parsers, chunking policy, token accounting, and batch embeddings.
-4. Benchmark retrieval and add a migration for the selected pgvector index/operator class.
-5. Add chat-document management and message persistence use cases.
-6. Implement citation-aware prompt assembly behind `LLMProvider` and stream typed SSE events.
-7. Add integration tests for upload/index failure recovery and end-to-end retrieval.
+- Gemini key missing or invalid: set `GEMINI_API_KEY` in `.env`, then restart backend and worker.
+- Gemini model rejected the request: verify `LLM_MODEL` and `EMBEDDING_MODEL`.
+- Invalid MinIO login: use `MINIO_ACCESS_KEY` as username and `MINIO_SECRET_KEY` as password. With
+  defaults, use `docmind` / `change-me-too`.
+- Changed MinIO credentials: run `docker compose down -v`, then `docker compose up --build`.
+- Document stuck in processing: check `docker compose logs worker`; provider failures should mark
+  the document `failed`.
+- pgvector dimension issues: reset local data with `docker compose down -v` and rerun migrations.

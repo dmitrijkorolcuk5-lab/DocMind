@@ -25,3 +25,11 @@ class DocumentList(BaseModel):
     items: list[DocumentRead]
     total: int
 
+
+class DocumentSourceRead(BaseModel):
+    document_id: UUID
+    filename: str
+    page_start: int | None
+    page_end: int | None
+    excerpt: str
+    score: float
