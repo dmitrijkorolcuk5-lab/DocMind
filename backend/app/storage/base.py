@@ -1,0 +1,16 @@
+from typing import Protocol
+
+
+class ObjectStorage(Protocol):
+    async def upload(self, key: str, data: bytes, content_type: str) -> None: ...
+
+    async def download(self, key: str) -> bytes: ...
+
+    async def delete(self, key: str) -> None: ...
+
+    async def exists(self, key: str) -> bool: ...
+
+
+class HealthCheckableObjectStorage(ObjectStorage, Protocol):
+    async def healthcheck(self) -> None: ...
+
