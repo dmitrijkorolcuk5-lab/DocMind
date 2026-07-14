@@ -1,6 +1,11 @@
-from app.errors import (
-    AppError,
-    ApplicationError,
+from app.errors.application import (
+    FileTooLargeError,
+    InvalidRequestError,
+    ResourceNotFoundError,
+    UnsupportedMediaTypeError,
+)
+from app.errors.base import AppError, ApplicationError
+from app.errors.provider import (
     DependencyAuthenticationError,
     DependencyError,
     DependencyInvalidRequestError,
@@ -11,10 +16,7 @@ from app.errors import (
     DependencyRateLimitError,
     DependencyTimeoutError,
     DependencyUnavailableError,
-    FileTooLargeError,
-    InvalidRequestError,
-    ResourceNotFoundError,
-    UnsupportedMediaTypeError,
+    ProviderErrorContext,
 )
 
 __all__ = [
@@ -32,6 +34,7 @@ __all__ = [
     "DependencyUnavailableError",
     "FileTooLargeError",
     "InvalidRequestError",
+    "ProviderErrorContext",
     "ResourceNotFoundError",
     "UnsupportedMediaTypeError",
 ]

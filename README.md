@@ -146,7 +146,16 @@ The AI layer is provider-based:
 - `GeminiLLMProvider`
 - `OpenAILLMProvider`
 
-Services depend on provider protocols, not concrete vendors.
+Services depend on provider protocols, not concrete vendors. Embedding providers share the typed
+`app.common.batching.batched_items` utility so batch order and batch-size validation stay consistent
+across vendors.
+
+Provider SDK exceptions are translated inside `app.errors.mappers` before they can leave the
+provider infrastructure. The application-facing hierarchy in `app.errors` carries stable error
+codes, safe messages, retryability, and provider/model metadata; FastAPI serialization remains
+centralized in `app.core.handlers`. To add another provider, implement the provider protocol, add a
+small mapper that converts SDK failures to `app.errors` dependency errors, and wire it through the
+existing factory.
 
 ## Document Processing
 

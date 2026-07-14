@@ -1,8 +1,14 @@
-from openai import AsyncOpenAI, OpenAIError
+from openai import AsyncOpenAI
 
+from app.common.batching import batched_items
 from app.core.config import Settings
-from app.core.exceptions import DependencyUnavailableError
 from app.embeddings.base import EmbeddingTask
+from app.errors.mappers.openai import OpenAIErrorMapper
+from app.errors.provider import (
+    DependencyAuthenticationError,
+    ProviderErrorContext,
+    map_provider_errors,
+)
 
 
 class OpenAIEmbeddingProvider:
@@ -13,6 +19,7 @@ class OpenAIEmbeddingProvider:
         self._model = settings.EMBEDDING_MODEL
         self._dimensions = settings.EMBEDDING_DIMENSIONS
         self._batch_size = settings.EMBEDDING_BATCH_SIZE
+        self._error_mapper = OpenAIErrorMapper()
 
     async def embed_texts(
         self,
@@ -20,19 +27,26 @@ class OpenAIEmbeddingProvider:
         *,
         task: EmbeddingTask = "RETRIEVAL_DOCUMENT",
     ) -> list[list[float]]:
-        del task
         if not self._api_key:
-            raise DependencyUnavailableError("OPENAI_API_KEY is required to generate embeddings")
+            raise DependencyAuthenticationError(
+                "OPENAI_AUTHENTICATION_FAILED",
+                "OPENAI_API_KEY is required to generate embeddings",
+                provider="openai",
+                model=self._model,
+            )
         embeddings: list[list[float]] = []
-        try:
-            for start in range(0, len(texts), self._batch_size):
-                batch = texts[start : start + self._batch_size]
+        operation = "embed_query" if task == "RETRIEVAL_QUERY" else "embed_documents"
+        context = ProviderErrorContext(
+            provider="openai",
+            operation=operation,
+            model=self._model,
+        )
+        async with map_provider_errors(self._error_mapper, context):
+            for batch in batched_items(texts, self._batch_size):
                 response = await self._client.embeddings.create(
                     model=self._model,
                     input=batch,
                     dimensions=self._dimensions,
                 )
                 embeddings.extend([item.embedding for item in response.data])
-        except OpenAIError as exc:
-            raise DependencyUnavailableError("Embedding provider failed") from exc
         return embeddings

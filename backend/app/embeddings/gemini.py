@@ -1,10 +1,18 @@
 import math
+from collections.abc import Sequence
 
 import httpx
 
+from app.common.batching import batched_items
 from app.core.config import Settings
-from app.core.exceptions import DependencyUnavailableError
 from app.embeddings.base import EmbeddingTask
+from app.errors.mappers.gemini import GeminiErrorMapper
+from app.errors.provider import (
+    DependencyAuthenticationError,
+    DependencyInvalidResponseError,
+    ProviderErrorContext,
+    raise_provider_error,
+)
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -17,6 +25,7 @@ class GeminiEmbeddingProvider:
         self._batch_size = settings.EMBEDDING_BATCH_SIZE
         self._timeout = httpx.Timeout(settings.GEMINI_REQUEST_TIMEOUT_SECONDS)
         self._max_retries = settings.GEMINI_MAX_RETRIES
+        self._error_mapper = GeminiErrorMapper()
 
     async def embed_texts(
         self,
@@ -25,23 +34,30 @@ class GeminiEmbeddingProvider:
         task: EmbeddingTask = "RETRIEVAL_DOCUMENT",
     ) -> list[list[float]]:
         if not self._api_key:
-            raise DependencyUnavailableError("GEMINI_API_KEY is required to generate embeddings")
+            raise DependencyAuthenticationError(
+                "GEMINI_AUTHENTICATION_FAILED",
+                "GEMINI_API_KEY is required to generate embeddings",
+                provider="gemini",
+                model=self._model,
+            )
         if not texts:
             return []
 
         embeddings: list[list[float]] = []
+        context = self._context(task)
         async with httpx.AsyncClient(base_url=GEMINI_BASE_URL, timeout=self._timeout) as client:
-            for start in range(0, len(texts), self._batch_size):
-                batch = texts[start : start + self._batch_size]
-                embeddings.extend(await self._embed_batch(client, batch, task))
+            for batch in batched_items(texts, self._batch_size):
+                embeddings.extend(await self._embed_batch(client, batch, task, context))
         return embeddings
 
     async def _embed_batch(
         self,
         client: httpx.AsyncClient,
-        texts: list[str],
+        texts: Sequence[str],
         task: EmbeddingTask,
+        context: ProviderErrorContext | None = None,
     ) -> list[list[float]]:
+        error_context = context or self._context(task)
         last_error: httpx.HTTPError | None = None
         for attempt in range(self._max_retries + 1):
             try:
@@ -50,25 +66,32 @@ class GeminiEmbeddingProvider:
                 if 500 <= exc.response.status_code < 600 and attempt < self._max_retries:
                     last_error = exc
                     continue
-                raise _http_status_error(exc, self._model) from exc
+                raise_provider_error(exc, mapper=self._error_mapper, context=error_context)
             except httpx.TimeoutException as exc:
                 last_error = exc
                 if attempt >= self._max_retries:
-                    raise DependencyUnavailableError("Gemini embedding request timed out") from exc
+                    raise_provider_error(exc, mapper=self._error_mapper, context=error_context)
             except httpx.ConnectError as exc:
                 last_error = exc
                 if attempt >= self._max_retries:
-                    raise DependencyUnavailableError("Gemini API is unreachable") from exc
+                    raise_provider_error(exc, mapper=self._error_mapper, context=error_context)
             except httpx.HTTPError as exc:
                 last_error = exc
                 if attempt >= self._max_retries:
                     break
-        raise DependencyUnavailableError("Gemini embedding provider failed") from last_error
+        if last_error is not None:
+            raise_provider_error(last_error, mapper=self._error_mapper, context=error_context)
+        raise DependencyInvalidResponseError(
+            "GEMINI_INVALID_RESPONSE",
+            "Gemini embedding provider failed",
+            provider="gemini",
+            model=self._model,
+        )
 
     async def _try_embed_batch(
         self,
         client: httpx.AsyncClient,
-        texts: list[str],
+        texts: Sequence[str],
         task: EmbeddingTask,
     ) -> list[list[float]]:
         response = await client.post(
@@ -92,49 +115,51 @@ class GeminiEmbeddingProvider:
         try:
             payload = response.json()
         except ValueError as exc:
-            raise DependencyUnavailableError(
-                "Gemini returned an invalid embedding response"
-            ) from exc
+            raise self._invalid_response_error() from exc
 
         raw_embeddings = payload.get("embeddings")
         if not isinstance(raw_embeddings, list) or len(raw_embeddings) != len(texts):
-            raise DependencyUnavailableError("Gemini returned an invalid embedding response")
+            raise self._invalid_response_error()
         return [self._parse_embedding(item) for item in raw_embeddings]
 
     def _parse_embedding(self, payload: object) -> list[float]:
         if not isinstance(payload, dict):
-            raise DependencyUnavailableError("Gemini returned an invalid embedding response")
+            raise self._invalid_response_error()
         values = payload.get("values")
         if not isinstance(values, list) or not all(
             isinstance(value, int | float) for value in values
         ):
-            raise DependencyUnavailableError("Gemini returned an invalid embedding response")
+            raise self._invalid_response_error()
         result = [float(value) for value in values]
         if len(result) != self._dimensions:
-            raise DependencyUnavailableError(
+            raise self._invalid_response_error(
                 "Gemini embedding dimension mismatch: "
                 f"expected {self._dimensions}, got {len(result)}"
             )
         return _normalize(result)
 
+    def _invalid_response_error(
+        self,
+        message: str = "Gemini returned an invalid embedding response",
+    ) -> DependencyInvalidResponseError:
+        return DependencyInvalidResponseError(
+            "GEMINI_INVALID_RESPONSE",
+            message,
+            provider="gemini",
+            model=self._model,
+        )
+
+    def _context(self, task: EmbeddingTask) -> ProviderErrorContext:
+        operation = "embed_query" if task == "RETRIEVAL_QUERY" else "embed_documents"
+        return ProviderErrorContext(provider="gemini", operation=operation, model=self._model)
+
 
 def _normalize(values: list[float]) -> list[float]:
     norm = math.sqrt(sum(value * value for value in values))
     if norm == 0:
-        raise DependencyUnavailableError("Gemini returned an invalid zero embedding")
+        raise DependencyInvalidResponseError(
+            "GEMINI_INVALID_RESPONSE",
+            "Gemini returned an invalid zero embedding",
+            provider="gemini",
+        )
     return [value / norm for value in values]
-
-
-def _http_status_error(
-    exc: httpx.HTTPStatusError, model: str
-) -> DependencyUnavailableError:
-    status = exc.response.status_code
-    if status in {401, 403}:
-        return DependencyUnavailableError("Gemini API authentication failed")
-    if status == 429:
-        return DependencyUnavailableError("Gemini API quota was exceeded")
-    if status == 404:
-        return DependencyUnavailableError(f"Gemini embedding model '{model}' was not found")
-    if 500 <= status < 600:
-        return DependencyUnavailableError("Gemini embedding service is unavailable")
-    return DependencyUnavailableError("Gemini embedding request was rejected")

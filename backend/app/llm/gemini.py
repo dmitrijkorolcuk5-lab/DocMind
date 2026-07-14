@@ -1,14 +1,16 @@
 from collections.abc import AsyncIterator, Sequence
 
-import structlog
 from google import genai
-from google.genai import errors, types
+from google.genai import types
 
 from app.core.config import Settings
-from app.core.exceptions import DependencyUnavailableError
+from app.errors.mappers.gemini import GeminiErrorMapper
+from app.errors.provider import (
+    DependencyAuthenticationError,
+    ProviderErrorContext,
+    map_provider_errors,
+)
 from app.llm.base import LLMMessage
-
-logger = structlog.get_logger(__name__)
 
 
 class GeminiLLMProvider:
@@ -16,17 +18,28 @@ class GeminiLLMProvider:
         self._api_key = settings.GEMINI_API_KEY.get_secret_value()
         self.model = settings.LLM_MODEL
         self._client = genai.Client(api_key=self._api_key) if self._api_key else None
+        self._error_mapper = GeminiErrorMapper()
 
     async def stream_answer(self, messages: Sequence[LLMMessage]) -> AsyncIterator[str]:
         if self._client is None:
-            raise DependencyUnavailableError("GEMINI_API_KEY is required to generate answers")
+            raise DependencyAuthenticationError(
+                "GEMINI_AUTHENTICATION_FAILED",
+                "GEMINI_API_KEY is required to generate answers",
+                provider="gemini",
+                model=self.model,
+            )
 
         contents, system_instruction = _build_contents(messages)
         config = types.GenerateContentConfig(
             temperature=0.2,
             system_instruction=system_instruction,
         )
-        try:
+        context = ProviderErrorContext(
+            provider="gemini",
+            operation="stream_answer",
+            model=self.model,
+        )
+        async with map_provider_errors(self._error_mapper, context):
             stream = await self._client.aio.models.generate_content_stream(
                 model=self.model,
                 contents=contents,
@@ -36,15 +49,6 @@ class GeminiLLMProvider:
                 token = _extract_text(chunk)
                 if token:
                     yield token
-        except errors.APIError as exc:
-            raise _gemini_api_error(exc, self.model) from exc
-        except Exception as exc:
-            logger.warning(
-                "gemini_llm_unexpected_error",
-                model=self.model,
-                exception_type=type(exc).__name__,
-            )
-            raise DependencyUnavailableError("Gemini LLM provider failed") from exc
 
 
 def _build_contents(messages: Sequence[LLMMessage]) -> tuple[list[types.Content], str | None]:
@@ -66,28 +70,3 @@ def _extract_text(chunk: types.GenerateContentResponse) -> str:
     except ValueError:
         return ""
     return text if isinstance(text, str) else ""
-
-
-def _gemini_api_error(exc: errors.APIError, model: str) -> DependencyUnavailableError:
-    status_code = getattr(exc, "code", None)
-    gemini_status = getattr(exc, "status", None)
-    message = str(exc)
-    logger.warning(
-        "gemini_llm_api_error",
-        model=model,
-        exception_type=type(exc).__name__,
-        status_code=status_code,
-        gemini_error_code=status_code,
-        gemini_error_status=gemini_status,
-    )
-    if status_code in {401, 403}:
-        return DependencyUnavailableError("Gemini API authentication failed")
-    if status_code == 404:
-        return DependencyUnavailableError(f"Gemini LLM model '{model}' was not found")
-    if status_code == 429:
-        return DependencyUnavailableError("Gemini LLM quota was exceeded")
-    if isinstance(status_code, int) and 500 <= status_code < 600:
-        return DependencyUnavailableError("Gemini LLM service is unavailable")
-    if "not found" in message.lower() or "no longer available" in message.lower():
-        return DependencyUnavailableError(f"Gemini LLM model '{model}' is unavailable")
-    return DependencyUnavailableError("Gemini LLM request was rejected")
